@@ -27,7 +27,7 @@ config.lr = 0.00005
 
 config.epochs = 4000
 config.batch_size = 32
-config.sample_interval = 200
+config.sample_interval = 50
 config.example_count = 20
 
 class WGAN():

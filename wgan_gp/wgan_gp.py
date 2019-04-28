@@ -14,6 +14,7 @@ from keras.layers.convolutional import UpSampling2D, Conv2D
 from keras.models import Sequential, Model
 from keras.optimizers import RMSprop
 from functools import partial
+import wandb
 
 import keras.backend as K
 
@@ -22,6 +23,18 @@ import matplotlib.pyplot as plt
 import sys
 
 import numpy as np
+
+run = wandb.init(project='Keras-GAN', tags=['wgan_gp'])
+config = run.config
+
+config.latent_dim = 100
+config.n_critic = 5
+config.lr = 0.00005
+
+config.epochs = 30000
+config.batch_size = 32
+config.sample_interval = 100
+config.example_count = 20
 
 class RandomWeightedAverage(_Merge):
     """Provides a (random) weighted average between real and generated image samples"""
@@ -35,11 +48,11 @@ class WGANGP():
         self.img_cols = 28
         self.channels = 1
         self.img_shape = (self.img_rows, self.img_cols, self.channels)
-        self.latent_dim = 100
+        self.latent_dim = config.latent_dim
 
         # Following parameter and optimizer set as recommended in paper
-        self.n_critic = 5
-        optimizer = RMSprop(lr=0.00005)
+        self.n_critic = config.n_critic
+        optimizer = RMSprop(lr=config.lr)
 
         # Build the generator and critic
         self.generator = self.build_generator()
@@ -93,7 +106,7 @@ class WGANGP():
         self.generator.trainable = True
 
         # Sampled noise for input to generator
-        z_gen = Input(shape=(100,))
+        z_gen = Input(shape=(self.latent_dim,))
         # Generate images based of noise
         img = self.generator(z_gen)
         # Discriminator determines validity
@@ -101,6 +114,12 @@ class WGANGP():
         # Defines generator model
         self.generator_model = Model(z_gen, valid)
         self.generator_model.compile(loss=self.wasserstein_loss, optimizer=optimizer)
+        
+        # Save the model graph in the run
+        run.summary['graph'] = wandb.Graph.from_keras(self.generator_model)
+        
+        # Generate stable example noise to see it learn over time
+        self.example_noise = np.random.normal(0, 1, (config.example_count, self.latent_dim))
 
 
     def gradient_penalty_loss(self, y_true, y_pred, averaged_samples):
@@ -219,27 +238,25 @@ class WGANGP():
 
             # If at save interval => save generated image samples
             if epoch % sample_interval == 0:
-                self.sample_images(epoch)
+                self.sample_images(epoch, d_loss[0], g_loss)
 
-    def sample_images(self, epoch):
-        r, c = 5, 5
-        noise = np.random.normal(0, 1, (r * c, self.latent_dim))
-        gen_imgs = self.generator.predict(noise)
+    def sample_images(self, epoch, d_loss, g_loss):
+        metrics = {
+            'epoch': epoch,
+            'd_loss': d_loss,
+            'g_loss': g_loss,
+        }
+        
+        gen_imgs = self.generator.predict(self.example_noise)
 
         # Rescale images 0 - 1
         gen_imgs = 0.5 * gen_imgs + 0.5
-
-        fig, axs = plt.subplots(r, c)
-        cnt = 0
-        for i in range(r):
-            for j in range(c):
-                axs[i,j].imshow(gen_imgs[cnt, :,:,0], cmap='gray')
-                axs[i,j].axis('off')
-                cnt += 1
-        fig.savefig("images/mnist_%d.png" % epoch)
-        plt.close()
+        
+        metrics['examples'] = [wandb.Image(img) for img in gen_imgs]
+        
+        wandb.log(metrics)
 
 
 if __name__ == '__main__':
     wgan = WGANGP()
-    wgan.train(epochs=30000, batch_size=32, sample_interval=100)
+    wgan.train(epochs=config.epochs, batch_size=config.batch_size, sample_interval=config.sample_interval)

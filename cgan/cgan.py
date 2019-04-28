@@ -7,10 +7,23 @@ from keras.layers.advanced_activations import LeakyReLU
 from keras.layers.convolutional import UpSampling2D, Conv2D
 from keras.models import Sequential, Model
 from keras.optimizers import Adam
+import wandb
 
 import matplotlib.pyplot as plt
 
 import numpy as np
+
+run = wandb.init(project='Keras-GAN', tags=['cgan'])
+config = run.config
+
+config.latent_dim = 100
+config.lr = 0.0002
+config.beta_1 = 0.5
+
+config.epochs = 20000
+config.batch_size = 32
+config.sample_interval = 200
+config.example_count = 20
 
 class CGAN():
     def __init__(self):
@@ -20,9 +33,9 @@ class CGAN():
         self.channels = 1
         self.img_shape = (self.img_rows, self.img_cols, self.channels)
         self.num_classes = 10
-        self.latent_dim = 100
+        self.latent_dim = config.latent_dim
 
-        optimizer = Adam(0.0002, 0.5)
+        optimizer = Adam(config.lr, config.beta_1)
 
         # Build and compile the discriminator
         self.discriminator = self.build_discriminator()
@@ -51,6 +64,13 @@ class CGAN():
         self.combined = Model([noise, label], valid)
         self.combined.compile(loss=['binary_crossentropy'],
             optimizer=optimizer)
+        
+        # Save the model graph in the run
+        run.summary['graph'] = wandb.Graph.from_keras(self.combined)
+        
+        # Generate stable example noise to see it learn over time
+        self.example_noise = np.random.normal(0, 1, (config.example_count, self.latent_dim))
+        self.example_labels = np.mod(np.arange(0, config.example_count), self.num_classes).reshape(-1, 1)
 
     def build_generator(self):
 
@@ -156,30 +176,26 @@ class CGAN():
 
             # If at save interval => save generated image samples
             if epoch % sample_interval == 0:
-                self.sample_images(epoch)
+                self.sample_images(epoch, d_loss[0], 100*d_loss[1], g_loss)
 
-    def sample_images(self, epoch):
-        r, c = 2, 5
-        noise = np.random.normal(0, 1, (r * c, 100))
-        sampled_labels = np.arange(0, 10).reshape(-1, 1)
-
-        gen_imgs = self.generator.predict([noise, sampled_labels])
+    def sample_images(self, epoch, d_loss, d_acc, g_loss):
+        metrics = {
+            'epoch': epoch,
+            'd_loss': d_loss,
+            'd_acc': d_acc,
+            'g_loss': g_loss,
+        }
+        
+        gen_imgs = self.generator.predict([self.example_noise, self.example_labels])
 
         # Rescale images 0 - 1
         gen_imgs = 0.5 * gen_imgs + 0.5
-
-        fig, axs = plt.subplots(r, c)
-        cnt = 0
-        for i in range(r):
-            for j in range(c):
-                axs[i,j].imshow(gen_imgs[cnt,:,:,0], cmap='gray')
-                axs[i,j].set_title("Digit: %d" % sampled_labels[cnt])
-                axs[i,j].axis('off')
-                cnt += 1
-        fig.savefig("images/%d.png" % epoch)
-        plt.close()
+        
+        metrics['examples'] = [wandb.Image(gen_imgs[i], caption=self.example_labels[i]) for i in range(config.example_count)]
+        
+        wandb.log(metrics)
 
 
 if __name__ == '__main__':
     cgan = CGAN()
-    cgan.train(epochs=20000, batch_size=32, sample_interval=200)
+    cgan.train(epochs=config.epochs, batch_size=config.batch_size, sample_interval=config.sample_interval)

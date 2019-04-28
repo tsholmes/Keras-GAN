@@ -7,6 +7,7 @@ from keras.layers.advanced_activations import LeakyReLU
 from keras.layers.convolutional import UpSampling2D, Conv2D
 from keras.models import Sequential, Model
 from keras.optimizers import RMSprop
+import wandb
 
 import keras.backend as K
 
@@ -16,18 +17,31 @@ import sys
 
 import numpy as np
 
+run = wandb.init(project='Keras-GAN', tags=['wgan'])
+config = run.config
+
+config.latent_dim = 100
+config.n_critic = 5
+config.clip_value = 0.01
+config.lr = 0.00005
+
+config.epochs = 4000
+config.batch_size = 32
+config.sample_interval = 200
+config.example_count = 20
+
 class WGAN():
     def __init__(self):
         self.img_rows = 28
         self.img_cols = 28
         self.channels = 1
         self.img_shape = (self.img_rows, self.img_cols, self.channels)
-        self.latent_dim = 100
+        self.latent_dim = config.latent_dim
 
         # Following parameter and optimizer set as recommended in paper
-        self.n_critic = 5
-        self.clip_value = 0.01
-        optimizer = RMSprop(lr=0.00005)
+        self.n_critic = config.n_critic
+        self.clip_value = config.clip_value
+        optimizer = RMSprop(lr=config.lr)
 
         # Build and compile the critic
         self.critic = self.build_critic()
@@ -53,6 +67,12 @@ class WGAN():
         self.combined.compile(loss=self.wasserstein_loss,
             optimizer=optimizer,
             metrics=['accuracy'])
+        
+        # Save the model graph in the run
+        run.summary['graph'] = wandb.Graph.from_keras(self.combined)
+        
+        # Generate stable example noise to see it learn over time
+        self.example_noise = np.random.normal(0, 1, (config.example_count, self.latent_dim))
 
     def wasserstein_loss(self, y_true, y_pred):
         return K.mean(y_true * y_pred)
@@ -165,27 +185,24 @@ class WGAN():
 
             # If at save interval => save generated image samples
             if epoch % sample_interval == 0:
-                self.sample_images(epoch)
+                self.sample_images(epoch, 1 - d_loss[0], 1 - g_loss[0])
 
-    def sample_images(self, epoch):
-        r, c = 5, 5
-        noise = np.random.normal(0, 1, (r * c, self.latent_dim))
-        gen_imgs = self.generator.predict(noise)
+    def sample_images(self, epoch, d_loss, g_loss):
+        metrics = {
+            'epoch': epoch,
+            'd_loss': d_loss,
+            'g_loss': g_loss,
+        }
+        
+        gen_imgs = self.generator.predict(self.example_noise)
 
         # Rescale images 0 - 1
         gen_imgs = 0.5 * gen_imgs + 0.5
-
-        fig, axs = plt.subplots(r, c)
-        cnt = 0
-        for i in range(r):
-            for j in range(c):
-                axs[i,j].imshow(gen_imgs[cnt, :,:,0], cmap='gray')
-                axs[i,j].axis('off')
-                cnt += 1
-        fig.savefig("images/mnist_%d.png" % epoch)
-        plt.close()
-
+        
+        metrics['examples'] = [wandb.Image(img) for img in gen_imgs]
+        
+        wandb.log(metrics)
 
 if __name__ == '__main__':
     wgan = WGAN()
-    wgan.train(epochs=4000, batch_size=32, sample_interval=50)
+    wgan.train(epochs=config.epochs, batch_size=config.batch_size, sample_interval=config.sample_interval)

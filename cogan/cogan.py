@@ -8,12 +8,25 @@ from keras.layers.advanced_activations import LeakyReLU
 from keras.layers.convolutional import UpSampling2D, Conv2D
 from keras.models import Sequential, Model
 from keras.optimizers import Adam
+import wandb
 
 import matplotlib.pyplot as plt
 
 import sys
 
 import numpy as np
+
+run = wandb.init(project='Keras-GAN', tags=['cogan'])
+config = run.config
+
+config.latent_dim = 100
+config.lr = 0.0002
+config.beta_1 = 0.5
+
+config.epochs = 30000
+config.batch_size = 32
+config.sample_interval = 200
+config.example_count = 10
 
 class COGAN():
     """Reference: https://wiseodd.github.io/techblog/2017/02/18/coupled_gan/"""
@@ -22,9 +35,9 @@ class COGAN():
         self.img_cols = 28
         self.channels = 1
         self.img_shape = (self.img_rows, self.img_cols, self.channels)
-        self.latent_dim = 100
+        self.latent_dim = config.latent_dim
 
-        optimizer = Adam(0.0002, 0.5)
+        optimizer = Adam(config.lr, config.beta_1)
 
         # Build and compile the discriminator
         self.d1, self.d2 = self.build_discriminators()
@@ -56,6 +69,12 @@ class COGAN():
         self.combined = Model(z, [valid1, valid2])
         self.combined.compile(loss=['binary_crossentropy', 'binary_crossentropy'],
                                     optimizer=optimizer)
+        
+        # Save the model graph in the run
+        run.summary['graph'] = wandb.Graph.from_keras(self.combined)
+        
+        # Generate stable example noise to see it learn over time
+        self.example_noise = np.random.normal(0, 1, (config.example_count, self.latent_dim))
 
     def build_generators(self):
 
@@ -169,30 +188,31 @@ class COGAN():
 
             # If at save interval => save generated image samples
             if epoch % sample_interval == 0:
-                self.sample_images(epoch)
+                self.sample_images(epoch, d1_loss[0], 100*d1_loss[1], d2_loss[0], 100*d2_loss[1], g_loss[0])
 
-    def sample_images(self, epoch):
-        r, c = 4, 4
-        noise = np.random.normal(0, 1, (r * int(c/2), 100))
-        gen_imgs1 = self.g1.predict(noise)
-        gen_imgs2 = self.g2.predict(noise)
-
-        gen_imgs = np.concatenate([gen_imgs1, gen_imgs2])
+    def sample_images(self, epoch, d1_loss, d1_acc, d2_loss, d2_acc, g_loss):
+        metrics = {
+            'epoch': epoch,
+            'd1_loss': d1_loss,
+            'd1_acc': d1_acc,
+            'd2_loss': d2_loss,
+            'd2_acc': d2_acc,
+            'g_loss': g_loss,
+        }
+        
+        gen_imgs1 = self.g1.predict(self.example_noise)
+        gen_imgs2 = self.g2.predict(self.example_noise)
+        
+        gen_imgs = np.array([img for p in zip(gen_imgs1, gen_imgs2) for img in p])
 
         # Rescale images 0 - 1
         gen_imgs = 0.5 * gen_imgs + 0.5
-
-        fig, axs = plt.subplots(r, c)
-        cnt = 0
-        for i in range(r):
-            for j in range(c):
-                axs[i,j].imshow(gen_imgs[cnt, :,:,0], cmap='gray')
-                axs[i,j].axis('off')
-                cnt += 1
-        fig.savefig("images/mnist_%d.png" % epoch)
-        plt.close()
+        
+        metrics['examples'] = [wandb.Image(img, grouping=2) for img in gen_imgs]
+        
+        wandb.log(metrics)
 
 
 if __name__ == '__main__':
     gan = COGAN()
-    gan.train(epochs=30000, batch_size=32, sample_interval=200)
+    gan.train(epochs=config.epochs, batch_size=config.batch_size, sample_interval=config.sample_interval)

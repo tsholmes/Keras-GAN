@@ -7,12 +7,25 @@ from keras.layers.advanced_activations import LeakyReLU
 from keras.layers.convolutional import UpSampling2D, Conv2D
 from keras.models import Sequential, Model
 from keras.optimizers import Adam
+import wandb
 
 import matplotlib.pyplot as plt
 
 import sys
 
 import numpy as np
+
+run = wandb.init(project='Keras-GAN', tags=['dcgan'])
+config = run.config
+
+config.latent_dim = 100
+config.lr = 0.0002
+config.beta_1 = 0.5
+
+config.epochs = 4000
+config.batch_size = 32
+config.sample_interval = 50
+config.example_count = 20
 
 class DCGAN():
     def __init__(self):
@@ -21,9 +34,9 @@ class DCGAN():
         self.img_cols = 28
         self.channels = 1
         self.img_shape = (self.img_rows, self.img_cols, self.channels)
-        self.latent_dim = 100
+        self.latent_dim = config.latent_dim
 
-        optimizer = Adam(0.0002, 0.5)
+        optimizer = Adam(config.lr, config.beta_1)
 
         # Build and compile the discriminator
         self.discriminator = self.build_discriminator()
@@ -48,6 +61,12 @@ class DCGAN():
         # Trains the generator to fool the discriminator
         self.combined = Model(z, valid)
         self.combined.compile(loss='binary_crossentropy', optimizer=optimizer)
+        
+        # Save the model graph in the run
+        run.summary['graph'] = wandb.Graph.from_keras(self.combined)
+        
+        # Generate stable example noise to see it learn over time
+        self.example_noise = np.random.normal(0, 1, (config.example_count, self.latent_dim))
 
     def build_generator(self):
 
@@ -147,27 +166,26 @@ class DCGAN():
 
             # If at save interval => save generated image samples
             if epoch % save_interval == 0:
-                self.save_imgs(epoch)
+                self.save_imgs(epoch, d_loss[0], 100*d_loss[1], g_loss)
 
-    def save_imgs(self, epoch):
-        r, c = 5, 5
-        noise = np.random.normal(0, 1, (r * c, self.latent_dim))
-        gen_imgs = self.generator.predict(noise)
+    def save_imgs(self, epoch, d_loss, d_acc, g_loss):
+        metrics = {
+            'epoch': epoch,
+            'd_loss': d_loss,
+            'd_acc': d_acc,
+            'g_loss': g_loss,
+        }
+        
+        gen_imgs = self.generator.predict(self.example_noise)
 
         # Rescale images 0 - 1
         gen_imgs = 0.5 * gen_imgs + 0.5
-
-        fig, axs = plt.subplots(r, c)
-        cnt = 0
-        for i in range(r):
-            for j in range(c):
-                axs[i,j].imshow(gen_imgs[cnt, :,:,0], cmap='gray')
-                axs[i,j].axis('off')
-                cnt += 1
-        fig.savefig("images/mnist_%d.png" % epoch)
-        plt.close()
+        
+        metrics['examples'] = [wandb.Image(img) for img in gen_imgs]
+        
+        wandb.log(metrics)
 
 
 if __name__ == '__main__':
     dcgan = DCGAN()
-    dcgan.train(epochs=4000, batch_size=32, save_interval=50)
+    dcgan.train(epochs=config.epochs, batch_size=config.batch_size, save_interval=config.sample_interval)

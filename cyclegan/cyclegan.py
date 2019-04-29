@@ -15,6 +15,19 @@ import sys
 from data_loader import DataLoader
 import numpy as np
 import os
+import wandb
+
+run = wandb.init(project='Keras-GAN', tags=['cyclegan'])
+config = run.config
+
+config.dataset_name = 'apple2orange'
+config.lr = 0.0002
+config.beta_1 = 0.5
+
+config.epochs = 200
+config.batch_size = 1
+config.sample_interval = 200
+config.example_count = 1
 
 class CycleGAN():
     def __init__(self):
@@ -25,7 +38,7 @@ class CycleGAN():
         self.img_shape = (self.img_rows, self.img_cols, self.channels)
 
         # Configure data loader
-        self.dataset_name = 'apple2orange'
+        self.dataset_name = config.dataset_name
         self.data_loader = DataLoader(dataset_name=self.dataset_name,
                                       img_res=(self.img_rows, self.img_cols))
 
@@ -42,7 +55,7 @@ class CycleGAN():
         self.lambda_cycle = 10.0                    # Cycle-consistency loss
         self.lambda_id = 0.1 * self.lambda_cycle    # Identity loss
 
-        optimizer = Adam(0.0002, 0.5)
+        optimizer = Adam(config.lr, config.beta_1)
 
         # Build and compile the discriminators
         self.d_A = self.build_discriminator()
@@ -97,6 +110,13 @@ class CycleGAN():
                                             self.lambda_cycle, self.lambda_cycle,
                                             self.lambda_id, self.lambda_id ],
                             optimizer=optimizer)
+        
+        # Save the model graph in the run
+        run.summary['graph'] = wandb.Graph.from_keras(self.combined)
+        
+        # Use stable example images to see it learn over time
+        self.examples_A = self.data_loader.load_data(domain="A", batch_size=config.example_count, is_testing=True)
+        self.examples_B = self.data_loader.load_data(domain="B", batch_size=config.example_count, is_testing=True)
 
     def build_generator(self):
         """U-Net Generator"""
@@ -215,44 +235,37 @@ class CycleGAN():
 
                 # If at save interval => save generated image samples
                 if batch_i % sample_interval == 0:
-                    self.sample_images(epoch, batch_i)
+                    self.sample_images(epoch, batch_i, d_loss[0], 100*d_loss[1], g_loss[0], np.mean(g_loss[1:3]), np.mean(g_loss[3:5]), np.mean(g_loss[5:6]))
 
-    def sample_images(self, epoch, batch_i):
-        os.makedirs('images/%s' % self.dataset_name, exist_ok=True)
-        r, c = 2, 3
-
-        imgs_A = self.data_loader.load_data(domain="A", batch_size=1, is_testing=True)
-        imgs_B = self.data_loader.load_data(domain="B", batch_size=1, is_testing=True)
-
-        # Demo (for GIF)
-        #imgs_A = self.data_loader.load_img('datasets/apple2orange/testA/n07740461_1541.jpg')
-        #imgs_B = self.data_loader.load_img('datasets/apple2orange/testB/n07749192_4241.jpg')
+    def sample_images(self, epoch, batch_i, d_loss, d_acc, g_loss, g_loss_adv, g_loss_recon, g_loss_id):
+        metrics = {
+            'epoch': epoch,
+            'batch_i': batch_i,
+            'd_loss': d_loss,
+            'd_acc': d_acc,
+            'g_loss': g_loss,
+            'g_loss_adv': g_loss_adv,
+            'g_loss_recon': g_loss_recon,
+            'g_loss_id': g_loss_id,
+        }
 
         # Translate images to the other domain
-        fake_B = self.g_AB.predict(imgs_A)
-        fake_A = self.g_BA.predict(imgs_B)
+        fake_B = self.g_AB.predict(self.examples_A)
+        fake_A = self.g_BA.predict(self.examples_B)
         # Translate back to original domain
         reconstr_A = self.g_BA.predict(fake_B)
         reconstr_B = self.g_AB.predict(fake_A)
-
-        gen_imgs = np.concatenate([imgs_A, fake_B, reconstr_A, imgs_B, fake_A, reconstr_B])
+        
+        gen_imgs = np.array([img for p in zip(self.examples_A, fake_B, reconstr_A) for img in p] + [img for p in zip(self.examples_B, fake_A, reconstr_B) for img in p])
 
         # Rescale images 0 - 1
         gen_imgs = 0.5 * gen_imgs + 0.5
-
-        titles = ['Original', 'Translated', 'Reconstructed']
-        fig, axs = plt.subplots(r, c)
-        cnt = 0
-        for i in range(r):
-            for j in range(c):
-                axs[i,j].imshow(gen_imgs[cnt])
-                axs[i, j].set_title(titles[j])
-                axs[i,j].axis('off')
-                cnt += 1
-        fig.savefig("images/%s/%d_%d.png" % (self.dataset_name, epoch, batch_i))
-        plt.close()
+        
+        metrics['examples'] = [wandb.Image(img, grouping=3) for img in gen_imgs]
+        
+        wandb.log(metrics)
 
 
 if __name__ == '__main__':
     gan = CycleGAN()
-    gan.train(epochs=200, batch_size=1, sample_interval=200)
+    gan.train(epochs=config.epochs, batch_size=config.batch_size, sample_interval=config.sample_interval)
